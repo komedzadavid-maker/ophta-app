@@ -1,8 +1,9 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date
+import urllib.parse
 
-# Configurazione della pagina per smartphone
+# Configuration de la page pour smartphone
 st.set_page_config(page_title="OphtaClinique Togo", page_icon="👁️", layout="centered")
 
 # ==========================================
@@ -10,13 +11,17 @@ st.set_page_config(page_title="OphtaClinique Togo", page_icon="👁️", layout=
 # ==========================================
 if "patients" not in st.session_state:
     st.session_state.patients = [
-        {"id": 1, "nom": "Koffi Mensah", "tel": "+228 90 12 34 56", "ass": "INAM (80%)", "taux": 0.80},
-        {"id": 2, "nom": "Amavi Adjo", "tel": "+228 91 88 77 66", "ass": "Aucune (100% Patient)", "taux": 0.0},
-        {"id": 3, "nom": "Folly Kodjo", "tel": "+228 92 11 22 33", "ass": "Ascoma (70%)", "taux": 0.70}
+        {"id": 1, "nom": "Koffi Mensah", "tel": "+22890123456", "ass": "INAM (80%)", "taux": 0.80},
+        {"id": 2, "nom": "Amavi Adjo", "tel": "+22891887766", "ass": "Aucune (100% Patient)", "taux": 0.0},
+        {"id": 3, "nom": "Folly Kodjo", "tel": "+22892112233", "ass": "Ascoma (70%)", "taux": 0.70}
     ]
 
 if "consultations" not in st.session_state:
-    st.session_state.consultations = []
+    st.session_state.consultations = [
+        {"id": 1, "patient": "Koffi Mensah", "tel": "+22890123456", "assurance": "INAM (80%)", "date": date(2026, 5, 10), "acte": "Consultation Simple", "diagnostic": "Myopie", "prescription": "Lunettes", "total": 5000, "part_patient": 1000, "part_assurance": 4000, "statut": "PAYÉ"},
+        {"id": 2, "patient": "Amavi Adjo", "tel": "+22891887766", "assurance": "Aucune (100% Patient)", "date": date(2026, 5, 15), "acte": "Fond d'œil", "diagnostic": "Suivi diabète", "prescription": "RAS", "total": 8000, "part_patient": 8000, "part_assurance": 0, "statut": "PAYÉ"},
+        {"id": 3, "patient": "Folly Kodjo", "tel": "+22892112233", "assurance": "Ascoma (70%)", "date": date(2026, 6, 2), "acte": "Examen de Réfraction (Lunettes)", "diagnostic": "Presbytie", "prescription": "Verres progressifs", "total": 4000, "part_patient": 1200, "part_assurance": 2800, "statut": "PAYÉ"}
+    ]
 
 TARIFS = {
     "Consultation Simple": 5000,
@@ -27,20 +32,19 @@ TARIFS = {
 # ==========================================
 # INTERFACCIA GRAFICA
 # ==========================================
-st.title("👁️ OphtaClinique - Système de Contrôle")
-st.write("Antoine, voici le prototype de gestion financière anti-fraude pour ton cabinet.")
+st.title("👁️ OphtaClinique - Togo")
+st.write("Système Anti-Fraude, Assurances & Reçus WhatsApp")
 
-# Menu a Tab per simulare i vari ruoli della clinica
 tab1, tab2, tab3, tab4 = st.tabs(["📱 Accueil", "🩺 Médecin", "💰 Caisse", "📊 Direction"])
 
 # ------------------------------------------
-# TAB 1: ACCUEIL (Registrazione)
+# TAB 1: ACCUEIL
 # ------------------------------------------
 with tab1:
     st.header("Enregistrement Patient")
     with st.form("new_patient_form"):
         nom = st.text_input("Nom et Prénom du Patient")
-        tel = st.text_input("Numéro de Téléphone")
+        tel = st.text_input("Numéro de Téléphone (ex: +22890XXXXXX)")
         ass = st.selectbox("Assurance / Prise en charge", ["Aucune (100% Patient)", "INAM (80%)", "Ascoma (70%)"])
         
         submitted = st.form_submit_button("Enregistrer le Patient")
@@ -50,26 +54,24 @@ with tab1:
             elif "Ascoma" in ass: taux = 0.70
             
             new_id = len(st.session_state.patients) + 1
-            st.session_state.patients.append({"id": new_id, "nom": nom, "tel": tel, "ass": ass, "taux": taux})
-            st.success(f"✔️ Patient {nom} enregistré avec succès !")
+            st.session_state.patients.append({"id": new_id, "nom": nom, "tel": tel.replace(" ", ""), "ass": ass, "taux": taux})
+            st.success(f"✔️ Patient {nom} enregistré !")
 
 # ------------------------------------------
-# TAB 2: MÉDECIN (Diagnosi e Blocco Prezzo)
+# TAB 2: MÉDECIN
 # ------------------------------------------
 with tab2:
     st.header("Espace Consultation")
-    
-    # Selezione del paziente registrato
     lista_nomi = {p["nom"]: p for p in st.session_state.patients}
-    patient_sel = st.selectbox("Sélectionner le patient dans la salle d'attente", list(lista_nomi.keys()))
+    patient_sel = st.selectbox("Sélectionner le patient", list(lista_nomi.keys()))
     
     if patient_sel:
         p_data = lista_nomi[patient_sel]
         st.info(f"📋 Patient: {p_data['nom']} | Couverture: {p_data['ass']}")
         
         acte = st.selectbox("Acte Médical / Examen", list(TARIFS.keys()))
-        diagnostic = st.text_area("Diagnostic (ex: Cataracte, Myopie...)")
-        prescription = st.text_input("Prescription (ex: Collyre X, Verres correcteurs...)")
+        diagnostic = st.text_area("Diagnostic")
+        prescription = st.text_input("Prescription")
         
         if st.button("Valider la Consultation 🔒"):
             montant_total = TARIFS[acte]
@@ -79,8 +81,9 @@ with tab2:
             st.session_state.consultations.append({
                 "id": len(st.session_state.consultations) + 1,
                 "patient": p_data["nom"],
+                "tel": p_data["tel"],
                 "assurance": p_data["ass"],
-                "date": datetime.now().strftime("%d/%m/%Y"),
+                "date": date.today(),
                 "acte": acte,
                 "diagnostic": diagnostic,
                 "prescription": prescription,
@@ -89,63 +92,97 @@ with tab2:
                 "part_assurance": part_assurance,
                 "statut": "En attente de paiement"
             })
-            st.success("🔒 Envoyé alla caisse ! Le montant est bloqué par le système.")
+            st.success("🔒 Envoyé à la caisse ! Montant bloqué.")
 
 # ------------------------------------------
-# TAB 3: CAISSE (Incassement Bloccato)
+# TAB 3: CAISSE & WHATSAPP
 # ------------------------------------------
 with tab3:
-    st.header("Caisse Hors-Ligne")
-    
+    st.header("Caisse de la Clinique")
     en_attente = [c for c in st.session_state.consultations if c["statut"] == "En attente de paiement"]
     
     if not en_attente:
-        st.write("💰 Aucune facture en attente. Tout est en ordre.")
+        st.write("💰 Aucune facture en attente.")
     else:
         for c in en_attente:
-            with st.container():
-                st.write(f"**Patient :** {c['patient']} ({c['assurance']})")
-                st.write(f"**Acte :** {c['acte']}")
-                st.warning(f"👉 **À PERCEVOIR DU PATIENT : {int(c['part_patient'])} FCFA** (Part Assurance: {int(c['part_assurance'])} FCFA)")
+            st.write(f"**Patient :** {c['patient']} ({c['assurance']})")
+            st.warning(f"👉 **À PERCEVOIR : {int(c['part_patient'])} FCFA**")
+            
+            if st.button(f"Encaisser {int(c['part_patient'])} FCFA", key=f"btn_{c['id']}"):
+                c["statut"] = "PAYÉ"
+                st.success("🎟️ COMPTABILISÉ EFFICACEMENT !")
+                st.rerun()
                 
-                if st.button(f"Encaisser et Imprimer le Reçu (Patient: {c['patient']})", key=f"btn_{c['id']}"):
-                    c["statut"] = "PAYÉ"
-                    st.success("🎟️ REÇU IMPRIMÉ AUTOMATIQUEMENT !")
-                    st.code(f"""
-====================================
-      REÇU DE CAISSE OFFICIEL
-====================================
-Date: {c['date']}
-Patient: {c['patient']}
-Montant Perçu: {int(c['part_patient'])} FCFA
-Statut: ENCAISSÉ ET SÉCURISÉ
-====================================
-                    """)
-                    st.rerun()
+    st.write("---")
+    st.subheader("Derniers reçus payés (Envoi WhatsApp)")
+    payes_recents = [c for c in st.session_state.consultations if c["statut"] == "PAYÉ"]
+    
+    for p in payes_recents[-3:]: # Mostra gli ultimi 3 pagati
+        st.write(f"🟢 {p['patient']} - {int(p['part_patient'])} FCFA")
+        
+        # Generazione testo per WhatsApp
+        texte_recu = (
+            f"*OPHTACLINIQUE TOGO*\n"
+            f"Reçu de paiement officiel\n"
+            f"---------------------------\n"
+            f"Date: {p['date'].strftime('%d/%m/%Y')}\n"
+            f"Patient: {p['patient']}\n"
+            f"Acte: {p['acte']}\n"
+            f"Montant payé: {int(p['part_patient'])} FCFA\n"
+            f"Prise en charge Assurance: {int(p['part_assurance'])} FCFA\n"
+            f"---------------------------\n"
+            f"Merci pour votre confiance !"
+        )
+        # Urlencode per convertire gli spazi e caratteri speciali per il link web
+        texte_code = urllib.parse.quote(texte_recu)
+        link_wa = f"https://wa.me/{p['tel']}?text={texte_code}"
+        
+        # Pulsante che apre direttamente WhatsApp
+        st.video = st.link_button("📲 Envoyer le reçu via WhatsApp", link_wa)
 
 # ------------------------------------------
-# TAB 4: DIRECTION (Controllo Totale)
+# TAB 4: DIRECTION & EXCEL EXPORT
 # ------------------------------------------
 with tab4:
-    st.header("Tableau de Bord du Directeur")
+    st.header("Contrôle Directeur & Audits")
     
-    payes = [c for c in st.session_state.consultations if c["statut"] == "PAYÉ"]
+    oggi = date.today()
+    primo_maggio = date(2026, 5, 1)
     
-    cash_reel = sum([c["part_patient"] for c in payes])
-    dette_ass = sum([c["part_assurance"] for c in payes])
+    per_input = st.date_input("Sélectionnez la période", value=(primo_maggio, oggi), max_value=oggi)
     
-    col1, col2 = st.columns(2)
-    col1.metric("💵 Cash Réel en Caisse", f"{int(cash_reel)} FCFA")
-    col2.metric("🏦 À réclamer aux Assurances", f"{int(dette_ass)} FCFA")
-    
-    st.subheader("Historique et Dossiers Médicaux des Patients")
-    if not st.session_state.consultations:
-        st.write("Aucune activité enregistrée aujourd'hui.")
+    if isinstance(per_input, tuple) and len(per_input) == 2:
+        start_date, end_date = per_input
     else:
-        for c in st.session_state.consultations:
-            status_color = "🟢" if c["statut"] == "PAYÉ" else "🔴"
-            with st.expander(f"{status_color} {c['date']} - {c['patient']}"):
-                st.write(f"**Diagnostic :** {c['diagnostic']}")
-                st.write(f"**Prescription :** {c['prescription']}")
-                st.write(f"**Détails Financiers :** Total {int(c['total'])} FCFA (Patient: {int(c['part_patient'])} FCFA / Assur.: {int(c['part_assurance'])} FCFA)")
-                st.write(f"**Statut :** {c['statut']}")
+        start_date = end_date = per_input[0] if isinstance(per_input, tuple) else per_input
+
+    if st.session_state.consultations:
+        df = pd.DataFrame(st.session_state.consultations)
+        df_filtre = df[(df['date'] >= start_date) & (df['date'] <= end_date) & (df['statut'] == 'PAYÉ')]
+        
+        cash_reel = df_filtre['part_patient'].sum() if not df_filtre.empty else 0
+        dette_ass = df_filtre['part_assurance'].sum() if not df_filtre.empty else 0
+        
+        st.markdown(f"### 📈 Rapport du **{start_date.strftime('%d/%m/%Y')}** au **{end_date.strftime('%d/%m/%Y')}**")
+        
+        col1, col2 = st.columns(2)
+        col1.metric("💵 Cash Réel Perçu", f"{int(cash_reel):,} FCFA".replace(",", " "))
+        col2.metric("🏦 À facturer aux Assurances", f"{int(dette_ass):,} FCFA".replace(",", " "))
+        
+        # NUOVO PULSANTE EXPORT EXCEL/CSV
+        if not df_filtre.empty:
+            st.write(" ")
+            # Escludiamo colonne tecniche per rendere il file Excel pulito per il direttore
+            df_export = df_filtre[['date', 'patient', 'assurance', 'acte', 'total', 'part_patient', 'part_assurance']]
+            csv_data = df_export.to_csv(index=False).encode('utf-8')
+            
+            st.download_button(
+                label="📥 Télécharger ce rapport pour Excel (.csv)",
+                data=csv_data,
+                file_name=f"Rapport_OphtaClinique_{start_date}_{end_date}.csv",
+                mime="text/csv",
+            )
+            
+            st.dataframe(df_export)
+    else:
+        st.write("Aucune donnée.")
