@@ -1,357 +1,236 @@
 import streamlit as st
-import pandas as pd
 import sqlite3
-import re
-import urllib.parse
-import io
-from datetime import datetime
+import hashlib
+import logging
+from typing import Tuple, Optional, List, Any
 
-# Import per la generazione del PDF ufficiale (ReportLab)
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+# ==========================================
+# CONFIGURATION GLOBALE ET LOGGING
+# ==========================================
+st.set_page_config(page_title="OphtaClinique Pro", page_icon="👁️", layout="centered")
 
-# 1. CONFIGURAZIONE PAGINA
-st.set_page_config(page_title="OphtaClinique Togo - ERP", page_icon="👁️", layout="centered")
-
-# 2. STRUTTURA PERSISTENZA DATI (SQLITE ORA SOTTOSTANTE)
-DB_FILE = "clinic.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    # Tabella Pazienti con vincolo di unicità sul telefono
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS patients (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nom TEXT NOT NULL,
-            tel TEXT NOT NULL UNIQUE,
-            email TEXT,
-            assurance TEXT NOT NULL,
-            taux REAL NOT NULL
-        )
-    """)
-    # Tabella Consultazioni con timestamp cronologico nativo e snapshot dei dati finanziari
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS consultations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            patient_id INTEGER,
-            patient_nom TEXT NOT NULL,
-            patient_tel TEXT NOT NULL,
-            assurance TEXT NOT NULL,
-            acte TEXT NOT NULL,
-            total INTEGER NOT NULL,
-            part_patient INTEGER NOT NULL,
-            part_assurance INTEGER NOT NULL,
-            diagnostic TEXT,
-            statut TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# Dizionario di configurazione rigido per evitare parsing fragili di stringhe
-ASSURANCES_CONFIG = {
-    "Aucune (100% Patient)": 0.0,
-    "INAM (80%)": 0.80,
-    "Ascoma (70%)": 0.70
-}
-
-TARIFS_PREDEFINIS = {
-    "Consultation Simple": 5000,
-    "Fond d'œil": 8000,
-    "Examen de Réfraction (Lunettes)": 4000
-}
-
-# Funzione di utilità per validare i numeri di telefono (Formato Togo: +228XXXXXXXX)
-def est_telephone_valide(tel):
-    pattern = r"^\+228\d{8}$"
-    return bool(re.match(pattern, tel))
-
-# 3. MOTORE DI GENERAZIONE PDF CERTIFICATO (FORMATO A4 & ACCENTI STANDARD)
-def generer_facture_pdf(caisse_record):
-    buffer = io.BytesIO()
-    # Impostazione esplicita su formato standard A4
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
-    story = []
-    styles = getSampleStyleSheet()
-    
-    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=18, leading=22, textColor=colors.HexColor('#1E3A8A'), alignment=1)
-    normal_style = styles['Normal']
-    bold_style = ParagraphStyle('BoldStyle', parent=normal_style, fontName='Helvetica-Bold')
-    
-    # Intestazione della Clinica
-    story.append(Paragraph("<b>OPHTACLINIQUE - TOGO</b>", title_style))
-    story.append(Paragraph("Lomé, Quartier Adidogomé | Tél: +228 22 00 00 00", ParagraphStyle('Sub', alignment=1, fontSize=9)))
-    story.append(Spacer(1, 20))
-    
-    # Dettagli del Documento Fiscale (I dati passati come stringhe Unicode gestiscono correttamente gli accenti)
-    story.append(Paragraph(f"<b>FACTURE N° :</b> FAC-2026-{caisse_record[0]}", normal_style))
-    story.append(Paragraph(f"<b>Date d'émission :</b> {datetime.strptime(caisse_record[11], '%Y-%m-%d %H:%M:%S').strftime('%d/%m/%Y %H:%M')}", normal_style))
-    story.append(Paragraph(f"<b>Patient :</b> {caisse_record[2]}", normal_style))
-    story.append(Paragraph(f"<b>Couverture d'assurance :</b> {caisse_record[4]}", normal_style))
-    story.append(Spacer(1, 15))
-    
-    # Tabella Finanziaria Strutturata
-    table_data = [
-        [Paragraph("<b>Désignation de l'acte</b>", bold_style), Paragraph("<b>Montant Total</b>", bold_style), Paragraph("<b>Part Assurance</b>", bold_style), Paragraph("<b>Net à Payer Patient</b>", bold_style)],
-        [Paragraph(caisse_record[5], normal_style), f"{caisse_record[6]} FCFA", f"{caisse_record[8]} FCFA", f"{caisse_record[7]} FCFA"]
-    ]
-    
-    t = Table(table_data, colWidths=[200, 90, 90, 110])
-    t.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F3F4F6')),
-        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-        ('TOPPADDING', (0,0), (-1,-1), 8),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 8),
-    ]))
-    story.append(t)
-    story.append(Spacer(1, 25))
-    
-    story.append(Paragraph("<b>Statut du Paiement : PAYÉ</b>", ParagraphStyle('Status', textColor=colors.HexColor('#16A34A'), fontName='Helvetica-Bold', fontSize=11)))
-    story.append(Spacer(1, 10))
-    story.append(Paragraph("<i>Ce document fait foi de reçu officiel de paiement. Les montants sont perçus en Francs CFA (XOF).</i>", normal_style))
-    
-    doc.build(story)
-    buffer.seek(0)
-    return buffer.getvalue()
-
-# 4. CONTROLLO RIGIDO DEGLI ACCESSI (ROLES-BASED ACCESS CONTROL)
-st.sidebar.title("🔐 Authentification")
-role = st.sidebar.selectbox(
-    "Sélectionnez votre rôle opérationnel :",
-    ["Veuillez choisir un rôle", "Réception", "Médecin", "Caisse", "Direction Uficiale"]
+# Configuration du journal des événements (Logs) pour la maintenance
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logger = logging.getLogger("OphtaClinique")
 
-if "last_paid_id" not in st.session_state:
-    st.session_state.last_paid_id = None
-
-# INTERFACCIA DI BENVENUTO SE NESSUN RUOLO È SELEZIONATO
-if role == "Veuillez choisir un rôle":
-    st.info("👋 Bienvenue sur l'ERP OphtaClinique. Veuillez sélectionner votre rôle dans le panneau latéral gauche pour accéder aux fonctionnalités sécurisées.")
+DB_NAME = 'clinique.db'
 
 # ==========================================
-# MODULE 1 : RECEPTION
+# COUCHE SÉCURITÉ (SECURITY LAYER)
 # ==========================================
-elif role == "Réception":
-    st.header("📋 Espace Réception & Enregistrement")
+def hash_password(password: str) -> str:
+    """
+    Hache le mot de passe en utilisant l'algorithme SHA-256.
     
-    with st.form("form_enregistrement_patient"):
-        nom = st.text_input("Nom et Prénom du Patient *")
-        tel = st.text_input("Numéro de Téléphone (ex: +22890123456) *")
-        email = st.text_input("Adresse E-mail (Optionnel)")
-        assurance_sel = st.selectbox("Prise en charge / Assurance", list(ASSURANCES_CONFIG.keys()))
+    Args:
+        password (str): Le mot de passe en clair.
         
-        if st.form_submit_button("Enregistrer le dossier patient"):
-            if not nom or not tel:
-                st.error("❌ Erreur : Les champs Nom et Téléphone sont obligatoires.")
-            elif not est_telephone_valide(tel.strip()):
-                st.error("❌ Erreur de format : Le numéro doit respecter le format officiel du Togo (ex: +22890123456).")
-            else:
-                tel_clean = tel.strip().replace(" ", "")
-                taux_associe = ASSURANCES_CONFIG[assurance_sel]
-                
-                conn = sqlite3.connect(DB_FILE)
-                cursor = conn.cursor()
-                try:
-                    cursor.execute(
-                        "INSERT INTO patients (nom, tel, email, assurance, taux) VALUES (?, ?, ?, ?, ?)",
-                        (nom.strip(), tel_clean, email.strip().lower(), assurance_sel, taux_associe)
-                    )
-                    conn.commit()
-                    st.success(f"✔️ Le dossier de {nom} è stato creato con successo.")
-                except sqlite3.IntegrityError:
-                    st.error(f"❌ Erreur Sécurité : Un patient possède déjà le numéro de téléphone {tel_clean}.")
-                finally:
-                    conn.close()
+    Returns:
+        str: L'empreinte cryptographique (hash) du mot de passe.
+    """
+    return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
 # ==========================================
-# MODULE 2 : MEDECIN
+# COUCHE DONNÉES (DATA LAYER)
 # ==========================================
-elif role == "Médecin":
-    st.header("🩺 Espace de Consultation Médicale")
-    
-    search_q = st.text_input("🔍 Rechercher un patient par Nom o Téléphone :")
-    
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    if search_q:
-        cursor.execute("SELECT * FROM patients WHERE nom LIKE ? OR tel LIKE ?", (f"%{search_q}%", f"%{search_q}%"))
-    else:
-        cursor.execute("SELECT * FROM patients")
-    patients_liste = cursor.fetchall()
-    conn.close()
-
-    if patients_liste:
-        dict_patients = {f"{p[1]} ({p[2]})": p for p in patients_liste}
-        patient_choisi_str = st.selectbox("Sélectionner le patient sur le fauteuil :", list(dict_patients.keys()))
-        p_actif = dict_patients[patient_choisi_str]
-        
-        st.success(f"📋 Dossier Actif : **{p_actif[1]}** | Assurance : **{p_actif[4]}**")
-        
-        type_acte = st.radio("Origine de la tarification du soin :", ["Tarif Standard Catalogue", "Prestation Spécifique (Saisie Manuelle)"])
-        
-        nom_acte_final = ""
-        prix_acte_final = 0
-        
-        if type_acte == "Tarif Standard Catalogue":
-            acte_sel = st.selectbox("Choisir l'acte :", list(TARIFS_PREDEFINIS.keys()))
-            nom_acte_final = acte_sel
-            prix_acte_final = TARIFS_PREDEFINIS[acte_sel]
-            st.metric("Tarif Réglementaire de l'acte", f"{prix_acte_final} FCFA")
-        else:
-            nom_acte_final = st.text_input("Saisir l'intitulé exact de la prestation spécifique *")
-            prix_acte_final = st.number_input("Définir le prix de l'acte (FCFA) *", min_value=0, step=1000, value=5000)
+def init_db() -> None:
+    """Initialise la base de données et crée les tables si elles n'existent pas."""
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
             
-        diagnostic = st.text_area("Observations cliniques & Diagnostic")
-        
-        if st.button("Transmettre le dossier financier et Verrouiller l'acte 🔒"):
-            if type_acte != "Tarif Standard Catalogue" and not nom_acte_final:
-                st.error("❌ Erreur : Veuillez spécifier le libellé de l'acte personnalisé.")
-            else:
-                total = int(prix_acte_final)
-                part_ass = int(total * p_actif[5])
-                part_pat = int(total - part_ass)
-                
-                conn = sqlite3.connect(DB_FILE)
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO consultations (patient_id, patient_nom, patient_tel, assurance, acte, total, part_patient, part_assurance, diagnostic, statut)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (p_actif[0], p_actif[1], p_actif[2], p_actif[4], nom_acte_final.strip(), total, part_pat, part_ass, diagnostic.strip(), "En attente de paiement"))
-                conn.commit()
-                conn.close()
-                st.success(f"🔒 Acte transmis en caisse. Montant dû par le patient : {part_pat} FCFA")
-    else:
-        st.warning("Aucun patient correspondant trouvé dans la base de données.")
-
-# ==========================================
-# MODULE 3 : CAISSE (BLINDATO CONTRO LE MANIPOLAZIONI)
-# ==========================================
-elif role == "Caisse":
-    st.header("💰 Caisse Principale d'Encaissement")
-    
-    # Gestione post-incasso (Emissione documenti bloccati)
-    if st.session_state.last_paid_id is not None:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM consultations WHERE id = ?", (st.session_state.last_paid_id,))
-        last_c = cursor.fetchone()
-        conn.close()
-        
-        if last_c:
-            st.success(f"🎟️ Encaissement validé pour : **{last_c[2]}** | Montant perçu : **{last_c[7]} FCFA**")
-            
-            # Generazione dinamica del PDF sicuro in formato A4
-            pdf_data = generer_facture_pdf(last_c)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button(
-                    label="📥 Télécharger la Facture PDF (A4)",
-                    data=pdf_data,
-                    file_name=f"Facture_{last_c[0]}_{last_c[2].replace(' ', '_')}.pdf",
-                    mime="application/pdf"
+            # Table Utilisateurs (RBAC)
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS utilisateurs (
+                    identifiant TEXT PRIMARY KEY,
+                    mot_de_passe_hash TEXT NOT NULL,
+                    role TEXT NOT NULL
                 )
-            with col2:
-                msg_wa = f"*OPHTACLINIQUE TOGO*\nReçu Officiel de Paiement\nFacture N°: FAC-2026-{last_c[0]}\nPatient: {last_c[2]}\nActe: {last_c[5]}\nMontant encaissé: {last_c[7]} FCFA\nStatut: PAYÉ ✔️"
-                st.link_button("📲 Envoyer via WhatsApp", f"https://wa.me/{last_c[3]}?text={urllib.parse.quote(msg_wa)}")
+            ''')
+            
+            # Table Patients
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS patients (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nom_complet TEXT NOT NULL,
+                    telephone TEXT,
+                    statut TEXT NOT NULL DEFAULT 'En attente',
+                    date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Création des utilisateurs par défaut pour le premier lancement
+            c.execute("SELECT COUNT(*) FROM utilisateurs")
+            if c.fetchone()[0] == 0:
+                pwd_par_defaut = hash_password("password123")
+                utilisateurs_test = [
+                    ("secretaire_lome", pwd_par_defaut, "Caisse"),
+                    ("dr_kossi", pwd_par_defaut, "Médecin")
+                ]
+                c.executemany(
+                    "INSERT INTO utilisateurs (identifiant, mot_de_passe_hash, role) VALUES (?, ?, ?)", 
+                    utilisateurs_test
+                )
+                conn.commit()
+                logger.info("Base de données initialisée avec les comptes par défaut.")
+    except sqlite3.Error as e:
+        logger.error(f"Erreur critique lors de l'initialisation de la BD : {e}")
+        st.error("Erreur système : Impossible de se connecter à la base de données.")
+
+def verifier_connexion(identifiant: str, mot_de_passe: str) -> Tuple[bool, Optional[str]]:
+    """
+    Vérifie les identifiants de l'utilisateur.
+    
+    Returns:
+        Tuple[bool, Optional[str]]: (Est_valide, Role_Utilisateur)
+    """
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            c.execute("SELECT mot_de_passe_hash, role FROM utilisateurs WHERE identifiant = ?", (identifiant,))
+            resultat = c.fetchone()
+            
+            if resultat:
+                hash_stocke, role = resultat
+                if hash_stocke == hash_password(mot_de_passe):
+                    logger.info(f"Connexion réussie pour l'utilisateur : {identifiant}")
+                    return True, role
+                    
+        logger.warning(f"Tentative de connexion échouée pour : {identifiant}")
+        return False, None
+    except sqlite3.Error as e:
+        logger.error(f"Erreur BD lors de la vérification de connexion : {e}")
+        return False, None
+
+def ajouter_patient(nom_complet: str, telephone: str) -> bool:
+    """Insère un nouveau patient dans la file d'attente."""
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            c.execute("INSERT INTO patients (nom_complet, telephone) VALUES (?, ?)", (nom_complet, telephone))
+            conn.commit()
+            logger.info(f"Nouveau patient enregistré : {nom_complet}")
+        return True
+    except sqlite3.Error as e:
+        logger.error(f"Erreur lors de l'ajout du patient {nom_complet} : {e}")
+        return False
+
+def recuperer_patients_par_statut(statut: str) -> List[Tuple[Any, ...]]:
+    """Récupère la liste des patients selon leur statut actuel."""
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT id, nom_complet, telephone, date_creation FROM patients WHERE statut = ? ORDER BY date_creation ASC", 
+                (statut,)
+            )
+            return c.fetchall()
+    except sqlite3.Error as e:
+        logger.error(f"Erreur lors de la récupération des patients ({statut}) : {e}")
+        return []
+
+# ==========================================
+# COUCHE PRÉSENTATION (FRONTEND / UI)
+# ==========================================
+def afficher_ecran_connexion() -> None:
+    """Génère l'interface de connexion."""
+    st.title("🔒 OphtaClinique - Portail Sécurisé")
+    st.write("Veuillez saisir vos identifiants d'entreprise.")
+    
+    with st.form("formulaire_connexion"):
+        identifiant = st.text_input("Identifiant").strip()
+        mot_de_passe = st.text_input("Mot de passe", type="password")
+        bouton_validation = st.form_submit_button("Se connecter", use_container_width=True)
+        
+        if bouton_validation:
+            if not identifiant or not mot_de_passe:
+                st.warning("⚠️ Veuillez remplir tous les champs.")
+                return
                 
-            if st.button("🔄 Passer au patient suivant", type="primary"):
-                st.session_state.last_paid_id = None
+            est_valide, role_utilisateur = verifier_connexion(identifiant, mot_de_passe)
+            if est_valide:
+                st.session_state['connecte'] = True
+                st.session_state['identifiant'] = identifiant
+                st.session_state['role'] = role_utilisateur
                 st.rerun()
-            st.write("---")
+            else:
+                st.error("❌ Identifiant ou mot de passe incorrect.")
 
-    # Elenco delle fatture inviate dal medico (Sola Lettura)
-    st.subheader("💳 Attentes de règlement")
+def afficher_interface_caisse() -> None:
+    """Génère l'interface dédiée au secrétariat et à la caisse."""
+    st.title("💸 Module Caisse & Accueil")
     
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM consultations WHERE statut = 'En attente de paiement'")
-    attentes = cursor.fetchall()
-    conn.close()
+    st.subheader("Enregistrer un nouveau patient")
+    with st.form("formulaire_patient", clear_on_submit=True):
+        nom_patient = st.text_input("Nom et Prénom du patient", max_chars=100)
+        tel_patient = st.text_input("Numéro de téléphone (Optionnel)", max_chars=20)
+        soumettre_patient = st.form_submit_button("Valider et mettre en attente")
+        
+        if soumettre_patient:
+            if nom_patient.strip():
+                if ajouter_patient(nom_patient.strip(), tel_patient.strip()):
+                    st.success(f"Dossier créé pour '{nom_patient}'. Patient en attente.")
+            else:
+                st.warning("⚠️ Le nom du patient est obligatoire pour l'enregistrement.")
     
-    if not attentes:
-        st.info("📌 Aucune facture en attente de paiement actuellement.")
+    st.subheader("État de la salle d'attente")
+    patients_en_attente = recuperer_patients_par_statut("En attente")
+    
+    if patients_en_attente:
+        for p in patients_en_attente:
+            st.text(f"🆔 Dossier: #{p[0]} | 👤 Nom: {p[1]} | 📞 Tel: {p[2] if p[2] else 'N/D'}")
     else:
-        for c in attentes:
-            with st.container():
-                st.write(f"**Patient :** {c[2]} | Couverture : *{c[4]}*")
-                st.write(f"**Acte prescrit par le médecin :** {c[5]}")
-                st.error(f"💵 **MONTANT INTEGRAL IMPOSÉ : {c[7]} FCFA**")
-                
-                # FUNZIONALITÀ DI CONFERMA PER EVITARE CLIC ACCIDENTALI
-                with st.popover(f"Valider l'encaissement de {c[7]} FCFA"):
-                    st.write("⚠️ Confirmez-vous avoir reçu physiquement les fonds en espèces ?")
-                    if st.button("Oui, confirmer et verrouiller la transaction", key=f"btn_lock_{c[0]}"):
-                        conn = sqlite3.connect(DB_FILE)
-                        cursor = conn.cursor()
-                        cursor.execute("UPDATE consultations SET statut = 'PAYÉ' WHERE id = ?", (c[0],))
-                        conn.commit()
-                        conn.close()
-                        st.session_state.last_paid_id = c[0]
-                        st.rerun()
-            st.write("---")
+        st.info("La salle d'attente est actuellement vide.")
 
-# ==========================================
-# MODULE 4 : DIRECTION & EXPORT (CON BOM PER EXCEL)
-# ==========================================
-elif role == "Direction Uficiale":
-    st.header("📊 Tableau de Bord Direction & Audit")
+def afficher_interface_medecin() -> None:
+    """Génère l'interface dédiée aux consultations médicales."""
+    st.title("🩺 Module Clinique & Diagnostics")
+    st.subheader("File d'attente médicale")
     
-    conn = sqlite3.connect(DB_FILE)
-    # Lettura completa della tabella per analisi statistica
-    df = pd.read_sql_query("SELECT * FROM consultations", conn)
-    conn.close()
+    patients_a_consulter = recuperer_patients_par_statut("En attente")
     
-    if not df.empty:
-        # Formattazione corretta della data per i filtri di interfaccia
-        df['created_at_dt'] = pd.to_datetime(df['created_at'])
-        
-        st.subheader("🔍 Filtres d'Audit Financier")
-        f_col1, f_col2, f_col3 = st.columns(3)
-        
-        with f_col1:
-            ass_filter = st.selectbox("Assurance", ["Toutes"] + list(df['assurance'].unique()))
-        with f_col2:
-            acte_filter = st.selectbox("Acte Médical", ["Tous"] + list(df['acte'].unique()))
-        with f_col3:
-            statut_filter = st.selectbox("Statut Règlement", ["Tous", "PAYÉ", "En attente de paiement"])
-            
-        # Applicazione rigida dei filtri sul DataFrame
-        df_f = df
-        if ass_filter != "Toutes": df_f = df_f[df_f['assurance'] == ass_filter]
-        if acte_filter != "Tous": df_f = df_f[df_f['acte'] == acte_filter]
-        if statut_filter != "Tous": df_f = df_f[df_f['statut'] == statut_filter]
-        
-        # Indicatori Finanziari Chiave (KPI)
-        st.write("---")
-        kpi1, kpi2, kpi3 = st.columns(3)
-        with kpi1:
-            st.metric("Volume Total Facturé", f"{int(df_f['total'].sum())} FCFA")
-        with kpi2:
-            real_ca = int(df_f[df_f['statut'] == 'PAYÉ']['part_patient'].sum())
-            st.metric("Encaissements réels en caisse", f"{real_ca} FCFA", delta="Flux Physique Attendu")
-        with kpi3:
-            st.metric("Créances Assurances", f"{int(df_f['part_assurance'].sum())} FCFA")
-            
-        st.write("---")
-        st.subheader("📋 Registre chronologique des transactions")
-        st.dataframe(df_f[['id', 'created_at', 'patient_nom', 'assurance', 'acte', 'part_patient', 'part_assurance', 'statut']], use_container_width=True)
-        
-        # RIGENERAZIONE REPORT CON BOM CORRETTO PER EVITARE ROTTURE DI ACCENTI SU WINDOWS EXCEL
-        csv_buffer = df_f.to_csv(index=False).encode('utf-8-sig')
-        st.download_button(
-            label="📊 Exporter le registre d'audit vers Excel (CSV sécurisé)",
-            data=csv_buffer,
-            file_name=f"Audit_Financier_Clinique_{datetime.now().strftime('%d_%m_%Y')}.csv",
-            mime="text/csv"
-        )
+    if patients_a_consulter:
+        st.write("Sélectionnez un dossier patient pour commencer la consultation :")
+        for p in patients_a_consulter:
+            heure_enregistrement = p[3][11:16] if p[3] else "N/D"
+            with st.expander(f"👤 {p[1]} (Arrivée : {heure_enregistrement})"):
+                st.write(f"**Contact :** {p[2] if p[2] else 'Non renseigné'}")
+                st.button(f"Ouvrir le dossier clinique #{p[0]}", key=f"btn_visite_{p[0]}")
     else:
-        st.info("Aucune donnée financière n'est enregistrée dans la base de données centrale pour le moment.")
+        st.success("🎉 Tous les patients ont été vus. Aucune consultation en attente.")
+
+def main() -> None:
+    """Point d'entrée principal de l'application."""
+    init_db()
+    
+    if 'connecte' not in st.session_state:
+        st.session_state['connecte'] = False
+
+    if not st.session_state['connecte']:
+        afficher_ecran_connexion()
+    else:
+        # Barre latérale (Sidebar) de gestion de session
+        st.sidebar.title("👁️ OphtaClinique")
+        st.sidebar.markdown("---")
+        st.sidebar.write(f"👤 **Agent :** {st.session_state['identifiant']}")
+        st.sidebar.write(f"🛡️ **Accès :** {st.session_state['role']}")
+        st.sidebar.markdown("---")
+        
+        if st.sidebar.button("🚪 Déconnexion sécurisée", use_container_width=True):
+            st.session_state.clear()
+            st.rerun()
+            
+        # Routage selon le rôle (RBAC Routing)
+        role = st.session_state.get('role')
+        if role == "Caisse":
+            afficher_interface_caisse()
+        elif role == "Médecin":
+            afficher_interface_medecin()
+        else:
+            st.error("Erreur de privilège : Rôle non reconnu par le système.")
+
+if __name__ == '__main__':
+    main()
